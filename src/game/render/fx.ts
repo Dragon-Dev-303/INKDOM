@@ -29,6 +29,14 @@ export class Fx {
     if (heavy && this.shakeEnabled) this.shakeTime = TUNING.fx.shakeTicks / 60;
   }
 
+  /** Cosmetic attack trail: a couple of short-lived particles at the weapon tip. */
+  trail(x: number, y: number, colors: readonly string[]) {
+    for (let i = 0; i < 2; i++) {
+      const c = colors[Math.floor(Math.random() * colors.length)] ?? '#fff';
+      this.spawn(x, y, (Math.random() - 0.5) * 1.2, (Math.random() - 0.2) * 1.2, 0.3 + Math.random() * 0.2, c, 0.045 + Math.random() * 0.03);
+    }
+  }
+
   puff(x: number, y: number) {
     for (let i = 0; i < 12; i++) {
       const a = Math.random() * Math.PI * 2;

@@ -4,6 +4,7 @@ import { Fx } from '@/game/render/fx';
 import { PALETTES, Renderer } from '@/game/render/renderer';
 import { createMatch, stepMatch } from '@/game/sim/match';
 import { EMPTY_INPUT, type GameEvent } from '@/game/sim/types';
+import { resolveLoadout } from '@/game/config/shop';
 
 /** A fake 2D context that records calls and rejects non-finite coordinates. */
 function fakeCanvas() {
@@ -62,5 +63,34 @@ describe('canvas renderer', () => {
     expect(stats().calls).toBeGreaterThan(10000);
     expect(stats().bad).toBe(0);
     expect(fx.activeCount()).toBeLessThanOrEqual(200);
+  });
+
+  it('draws cosmetic hats, weapon skins and trails on both bosses (T-P15)', () => {
+    (globalThis as unknown as { window: unknown }).window = { devicePixelRatio: 1 };
+    const opts = (cosmetics?: ReturnType<typeof resolveLoadout>[]) => ({
+      palette: PALETTES.standard, showHints: false, debug: false, showFps: false, fps: 60, stepMs: 0, now: 0,
+      banners: [], toasts: [], smallWindow: false, cosmetics,
+    });
+    const hats = ['hat_headband', 'hat_tophat', 'hat_horns', 'hat_halo', 'hat_crown'];
+    for (const hat of hats) {
+      const plain = fakeCanvas();
+      const dressed = fakeCanvas();
+      const fxA = new Fx();
+      const fxB = new Fx();
+      const rA = new Renderer(plain.canvas, BUILDING);
+      const rB = new Renderer(dressed.canvas, BUILDING);
+      const look = [resolveLoadout({ hat, weapon: 'wpn_neon', trail: 'trail_rainbow' }), resolveLoadout({ hat: 'hat_crown', weapon: 'wpn_gold' })];
+      const s = createMatch({ p1Team: 'ATTACKER', weapons: ['SHORT_SWORD', 'IRON_BAR'], controllers: ['CPU', 'CPU'] }, 7);
+      for (let i = 0; i < 1500; i++) {
+        stepMatch(s, [EMPTY_INPUT, EMPTY_INPUT], []);
+        if (i % 3 === 0) {
+          rA.render(s, 1, fxA, opts());
+          rB.render(s, 1, fxB, opts(look));
+        }
+      }
+      expect(dressed.stats().bad).toBe(0);
+      expect(dressed.stats().calls).toBeGreaterThan(plain.stats().calls);
+      expect(fxB.activeCount()).toBeLessThanOrEqual(200);
+    }
   });
 });

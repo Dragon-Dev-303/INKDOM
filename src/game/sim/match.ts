@@ -1,8 +1,9 @@
-import { ATTACKS, TUNING, secondsToTicks } from '../config/tuning';
+import { TUNING, secondsToTicks } from '../config/tuning';
+import { recordPresses, resolveMove } from '../combat/resolver';
 import { BUILDING, type LevelDef } from '../level/building';
 import { computeAiInput, createBotMemory } from '../ai/brain';
-import { isAlive, killFighter, releaseTokensFor, resolveHits, startAttack, weaponAttack } from './combat';
-import { bodyBox, depenetrate, overlaps, separateEnemies, updateLocomotion } from './physics';
+import { isAlive, killFighter, regenStamina, releaseTokensFor, resolveHits, spendStamina, startMove, updateComboState } from './combat';
+import { bodyBox, depenetrate, nearDescent, overlaps, separateEnemies, updateLocomotion } from './physics';
 import {
   EMPTY_INPUT, otherTeam,
   type Fighter, type FloorId, type GameEvent, type InputFrame, type MatchConfig, type MatchState,
@@ -14,7 +15,7 @@ export const FIGHTER_COUNT = 8;
 
 export const DEFAULT_CONFIG: MatchConfig = {
   p1Team: 'ATTACKER',
-  weapons: ['SHORT_SWORD', 'IRON_BAR'],
+  weapons: ['FISTS', 'FISTS'],
   controllers: ['HUMAN', 'HUMAN'],
 };
 
@@ -30,10 +31,12 @@ function makeFighter(
     facing: team === 'ATTACKER' ? 1 : -1,
     grounded: true, lastGroundedTick: 0, floor: (Math.round(sp.y / 4) as FloorId),
     mode: 'GROUND', stairId: 0, stairS: 0, ladderId: 0,
-    action: 'NONE', actionTick: 0, actionDuration: 0, attackId: null, attackHitIds: [],
+    action: 'NONE', actionTick: 0, actionDuration: 0, moveId: null, attackHitIds: [],
+    inputLog: [], crouching: false, stamina: TUNING.combat.stamina.max, staminaRegenAt: 0, energy: 0,
+    comboHits: 0, comboDamage: 0, juggleHits: 0, reaction: 'high', dashTicks: 0, dodgeReadyAt: 0,
     hp: maxHp, maxHp, stagger: 0, lastHitTick: -1000, lastHitterId: -1,
     invulnUntil: 0, spawnProtected: false, hitstop: 0, flashUntil: 0, deathTick: -1, respawnAt: -1,
-    buffer: { jump: 0, punch: 0, kick: 0, weapon: 0 },
+    buffer: { jump: 0 },
     stride: 0, stats: { kos: 0, deaths: 0 },
   };
 }
@@ -42,7 +45,7 @@ function makeFighter(
 export function createMatch(config: MatchConfig, seed: number, level: LevelDef = BUILDING): MatchState {
   const fighters: Fighter[] = [];
   const p1Team = config.p1Team;
-  const botWeapons: WeaponId[] = ['IRON_BAR', 'SHORT_SWORD', 'IRON_BAR'];
+  const botWeapons: WeaponId[] = ['FISTS', 'SHORT_SWORD', 'IRON_BAR'];
   for (const team of ['ATTACKER', 'DEFENDER'] as Team[]) {
     const playerIndex: 0 | 1 = team === p1Team ? 0 : 1;
     const base = team === 'ATTACKER' ? 0 : 4;
@@ -108,15 +111,22 @@ export function respawnFighter(state: MatchState, f: Fighter, level: LevelDef, e
   f.action = 'NONE';
   f.actionTick = 0;
   f.actionDuration = 0;
-  f.attackId = null;
+  f.moveId = null;
   f.attackHitIds = [];
+  f.inputLog = [];
+  f.crouching = false;
+  f.stamina = TUNING.combat.stamina.max;
+  f.comboHits = 0;
+  f.comboDamage = 0;
+  f.juggleHits = 0;
+  f.dashTicks = 0;
   f.hp = f.maxHp;
   f.stagger = 0;
   f.hitstop = 0;
   f.respawnAt = -1;
   f.invulnUntil = state.tick + secondsToTicks(TUNING.fighters.spawnProtectionSeconds);
   f.spawnProtected = true;
-  f.buffer = { jump: 0, punch: 0, kick: 0, weapon: 0 };
+  f.buffer = { jump: 0 };
   events.push({ type: 'RESPAWN', fighter: f.id });
 }
 
@@ -175,7 +185,9 @@ export function cycleCommand(state: MatchState, team: Team, events: GameEvent[])
 function advanceAction(state: MatchState, f: Fighter, level: LevelDef, events: GameEvent[]) {
   const S = TUNING.combat.stagger;
   f.actionTick++;
+  if (f.dashTicks > 0) f.dashTicks--;
   switch (f.action) {
+    case 'DODGE':
     case 'ATTACK':
     case 'BLOCKSTUN':
     case 'GUARDBREAK':
@@ -183,8 +195,9 @@ function advanceAction(state: MatchState, f: Fighter, level: LevelDef, events: G
     case 'GETUP':
       if (f.actionTick >= f.actionDuration) {
         f.action = 'NONE';
-        f.attackId = null;
+        f.moveId = null;
         f.actionTick = 0;
+        f.dashTicks = 0;
       }
       break;
     case 'KNOCKDOWN':
@@ -204,34 +217,58 @@ function advanceAction(state: MatchState, f: Fighter, level: LevelDef, events: G
   if (f.spawnProtected && state.tick >= f.invulnUntil) f.spawnProtected = false;
 }
 
-/** Turn an InputFrame into buffered actions (plan §4.2.2). */
-function applyInput(state: MatchState, f: Fighter, input: InputFrame, events: GameEvent[]) {
+/** Turn an InputFrame into actions: block, crouch, dodge and moves via the combo resolver (v2 plan §2). */
+function applyInput(state: MatchState, f: Fighter, input: InputFrame, events: GameEvent[], level: LevelDef) {
   const B = TUNING.movement.bufferTicks;
-  const buf = f.buffer;
-  buf.jump = Math.max(0, buf.jump - 1);
-  buf.punch = Math.max(0, buf.punch - 1);
-  buf.kick = Math.max(0, buf.kick - 1);
-  buf.weapon = Math.max(0, buf.weapon - 1);
-  if (input.jumpPressed) buf.jump = B;
-  if (input.punchPressed) buf.punch = B;
-  if (input.kickPressed) buf.kick = B;
-  if (input.weaponPressed) buf.weapon = B;
+  const D = TUNING.combat.dodge;
+  f.buffer.jump = Math.max(0, f.buffer.jump - 1);
+  if (input.jumpPressed) f.buffer.jump = B;
 
   if (f.action === 'BLOCK' && !input.block) { f.action = 'NONE'; f.actionTick = 0; }
-  if (f.action !== 'NONE') return;
 
-  if (f.mode !== 'LADDER' && f.mode !== 'STAIR' && input.left !== input.right) f.facing = input.left ? -1 : 1;
+  // Chains and chord upgrades happen during an attack.
+  if (f.action === 'ATTACK') {
+    const d = resolveMove(f, state.tick, false);
+    if (d) startMove(state, f, d.move, events);
+    return;
+  }
+
+  const onFlat = f.grounded && f.mode === 'GROUND';
+  f.crouching = onFlat && input.down && (f.action === 'NONE' || f.action === 'BLOCK') && !nearDescent(level, f);
+  if (f.action !== 'NONE' && f.action !== 'BLOCK') return;
+
+  if (f.mode !== 'LADDER' && f.mode !== 'STAIR' && input.left !== input.right && f.action === 'NONE' && !f.crouching) {
+    f.facing = input.left ? -1 : 1;
+  }
+
+  if (input.dodgePressed && onFlat && state.tick >= f.dodgeReadyAt && f.stamina >= D.stamina) {
+    spendStamina(f, D.stamina, state.tick);
+    f.action = 'DODGE';
+    f.actionTick = 0;
+    f.actionDuration = D.ticks;
+    f.crouching = false;
+    f.dashTicks = D.ticks;
+    f.vel.x = (-f.facing * D.distance * 60) / D.ticks;
+    f.invulnUntil = state.tick + D.invulnTo;
+    f.dodgeReadyAt = state.tick + D.ticks + D.cooldownTicks;
+    events.push({ type: 'DODGE', fighter: f.id });
+    return;
+  }
 
   if (input.block && f.grounded && (f.mode === 'GROUND' || f.mode === 'STAIR')) {
-    f.action = 'BLOCK';
-    f.actionTick = 0;
-    f.vel.x *= 0.5;
+    if (f.action !== 'BLOCK') {
+      f.action = 'BLOCK';
+      f.actionTick = 0;
+      f.vel.x *= 0.5;
+    }
     return;
   }
   if (f.mode === 'LADDER') return;
-  if (buf.weapon > 0) { buf.weapon = 0; startAttack(state, f, weaponAttack(f), events); return; }
-  if (buf.kick > 0) { buf.kick = 0; startAttack(state, f, 'KICK', events); return; }
-  if (buf.punch > 0) { buf.punch = 0; startAttack(state, f, 'PUNCH', events); }
+  const d = resolveMove(f, state.tick, true);
+  if (d) {
+    f.crouching = false;
+    startMove(state, f, d.move, events);
+  }
 }
 
 function updateCapture(state: MatchState, level: LevelDef, events: GameEvent[]) {
@@ -322,10 +359,16 @@ export function stepMatch(
 
   // 3. Fighter updates.
   for (const f of state.fighters) {
+    // Presses are recorded even during hit-stop so combos typed on hit are never lost.
+    if (isAlive(f) && playing) recordPresses(f, inputs[f.id], state.tick);
     if (f.hitstop > 0) { f.hitstop--; continue; }
     advanceAction(state, f, level, events);
-    if (isAlive(f)) applyInput(state, f, inputs[f.id], events);
-    updateLocomotion(level, f, isAlive(f) ? inputs[f.id] : EMPTY_INPUT, state.tick, events);
+    if (isAlive(f)) applyInput(state, f, inputs[f.id], events, level);
+    let move = isAlive(f) ? inputs[f.id] : EMPTY_INPUT;
+    if (f.crouching) move = { ...move, left: false, right: false, jumpPressed: false };
+    updateLocomotion(level, f, move, state.tick, events);
+    regenStamina(f, state.tick);
+    updateComboState(f);
   }
 
   // 4. Soft separation, 5. combat.
@@ -408,4 +451,4 @@ export function debugSetTimer(state: MatchState, seconds: number): void {
   state.timeLeftTicks = secondsToTicks(seconds);
 }
 
-export { otherTeam, releaseTokensFor, ATTACKS };
+export { otherTeam, releaseTokensFor };

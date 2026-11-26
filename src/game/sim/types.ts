@@ -1,7 +1,9 @@
-import type { AttackId } from '../config/tuning';
+import type { Button, RelDir } from '../combat/types';
 
 export type Team = 'ATTACKER' | 'DEFENDER';
-export type WeaponId = 'IRON_BAR' | 'SHORT_SWORD';
+/** FISTS = unarmed (boxing / kickboxing / karate move set). */
+export type WeaponId = 'FISTS' | 'IRON_BAR' | 'SHORT_SWORD';
+export const WEAPON_IDS: readonly WeaponId[] = ['FISTS', 'SHORT_SWORD', 'IRON_BAR'];
 export type SquadCommand = 'FOLLOW' | 'HOLD' | 'ATTACK';
 export type FloorId = 0 | 1 | 2 | 3 | 4; // F1, F2, F3, F4, ROOF
 
@@ -17,14 +19,18 @@ export interface InputFrame {
   jumpPressed: boolean;
   punchPressed: boolean;
   kickPressed: boolean;
+  heavyPressed: boolean;
   weaponPressed: boolean;
+  specialPressed: boolean;
   block: boolean;
+  dodgePressed: boolean;
   commandPressed: boolean;
 }
 
 export const EMPTY_INPUT: Readonly<InputFrame> = Object.freeze({
   left: false, right: false, up: false, down: false, jumpPressed: false,
-  punchPressed: false, kickPressed: false, weaponPressed: false, block: false, commandPressed: false,
+  punchPressed: false, kickPressed: false, heavyPressed: false, weaponPressed: false, specialPressed: false,
+  block: false, dodgePressed: false, commandPressed: false,
 });
 
 /** Locomotion mode. */
@@ -32,7 +38,13 @@ export type Mode = 'GROUND' | 'AIR' | 'STAIR' | 'LADDER';
 
 /** Action layer on top of locomotion. */
 export type ActionState =
-  | 'NONE' | 'ATTACK' | 'BLOCK' | 'BLOCKSTUN' | 'GUARDBREAK' | 'HITSTUN' | 'KNOCKDOWN' | 'GETUP' | 'DEAD';
+  | 'NONE' | 'ATTACK' | 'BLOCK' | 'BLOCKSTUN' | 'GUARDBREAK' | 'HITSTUN' | 'KNOCKDOWN' | 'GETUP' | 'DODGE' | 'DEAD';
+
+/** Which body height a hit reaction shows (render only). */
+export type HitReaction = 'high' | 'mid' | 'low' | 'launch';
+
+/** One recorded button press (INKDOM_v2_Plan.md §2.3). Serializable for online play. */
+export interface PressRecord { b: Button; dir: RelDir; air: boolean; tick: number; used: boolean }
 
 export interface Fighter {
   id: number;
@@ -62,8 +74,24 @@ export interface Fighter {
   action: ActionState;
   actionTick: number;
   actionDuration: number;
-  attackId: AttackId | null;
+  /** Current move id from the move database while action === 'ATTACK'. */
+  moveId: string | null;
   attackHitIds: number[];
+  /** Recent presses (newest last), used for chains, chords and buffering. */
+  inputLog: PressRecord[];
+  crouching: boolean;
+  stamina: number;
+  staminaRegenAt: number;
+  energy: number;
+  /** Victim-side combo bookkeeping: hits taken since last recovery, airborne hits. */
+  comboHits: number;
+  comboDamage: number;
+  juggleHits: number;
+  /** Hit reaction to display while in HITSTUN. */
+  reaction: HitReaction;
+  /** Ticks left of scripted move/dodge travel (no ground friction while > 0). */
+  dashTicks: number;
+  dodgeReadyAt: number;
 
   hp: number;
   maxHp: number;
@@ -77,7 +105,7 @@ export interface Fighter {
   deathTick: number;
   respawnAt: number;
 
-  buffer: { jump: number; punch: number; kick: number; weapon: number };
+  buffer: { jump: number };
   /** Distance travelled — drives run-cycle animation with no foot sliding. */
   stride: number;
   stats: { kos: number; deaths: number };
@@ -97,7 +125,11 @@ export interface BotMemory {
   reactionReadyTick: number;
   nextDecisionTick: number;
   blockUntil: number;
-  wantAttack: AttackId | null;
+  /** Crouch while blocking (incoming low). */
+  blockLow: boolean;
+  /** Button sequence the bot is executing (combo routine), e.g. ['P','P','K']. */
+  routine: Button[];
+  routineStep: number;
   retreatUntil: number;
   retreatCooldownUntil: number;
   bestCost: number;
@@ -141,8 +173,9 @@ export interface MatchState {
 }
 
 export type GameEvent =
-  | { type: 'ATTACK_START'; fighter: number; attack: AttackId }
-  | { type: 'HIT'; attacker: number; victim: number; attack: AttackId; blocked: boolean; guardBreak: boolean; damage: number; x: number; y: number; heavy: boolean }
+  | { type: 'ATTACK_START'; fighter: number; attack: string }
+  | { type: 'HIT'; attacker: number; victim: number; attack: string; blocked: boolean; guardBreak: boolean; damage: number; x: number; y: number; heavy: boolean; counter: boolean; combo: number }
+  | { type: 'DODGE'; fighter: number }
   | { type: 'KO'; victim: number; killer: number; x: number; y: number }
   | { type: 'RESPAWN'; fighter: number }
   | { type: 'JUMP'; fighter: number }

@@ -248,7 +248,9 @@ export function updateLocomotion(
       const target = dir * speed;
       const accelerating = target !== 0 && Math.sign(target) === Math.sign(f.vel.x || target) && Math.abs(target) >= Math.abs(f.vel.x);
       f.vel.x = approach(f.vel.x, target, (accelerating ? M.groundAccel : M.groundDecel) * DT);
-    } else if (f.action === 'ATTACK' || f.action === 'BLOCK') {
+    } else if (f.dashTicks > 0) {
+      // Scripted travel (lunges, dodge): keep the velocity set by the move.
+    } else if (f.action === 'ATTACK' || f.action === 'BLOCK' || f.action === 'DODGE') {
       f.vel.x *= M.attackRootFriction;
       if (Math.abs(f.vel.x) < 0.01) f.vel.x = 0;
     } else {
@@ -304,4 +306,15 @@ export function separateEnemies(level: LevelDef, fighters: Fighter[]): void {
       moveX(level, b, push * sign);
     }
   }
+}
+
+/** Standing where "down" means descend (stair top or ladder top), so it must not crouch. */
+export function nearDescent(level: LevelDef, f: Fighter): boolean {
+  for (const st of level.stairs) {
+    if (Math.abs(f.pos.y - st.top.y) < 0.05 && Math.abs(f.pos.x - st.top.x) < M.stairEntryRange * 1.5) return true;
+  }
+  for (const l of level.ladders) {
+    if (Math.abs(f.pos.y - l.y1) < 0.05 && f.pos.x < M.ladderGrabFromTopRange && f.pos.x > l.x - 0.5) return true;
+  }
+  return false;
 }

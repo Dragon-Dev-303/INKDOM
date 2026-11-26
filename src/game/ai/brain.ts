@@ -1,7 +1,10 @@
-import { ATTACKS, TUNING, type AttackId } from '../config/tuning';
+import { TUNING } from '../config/tuning';
+import { inChainWindow } from '../combat/resolver';
+import type { Button } from '../combat/types';
 import { nextRandom, randomInt } from '../core/rng';
 import type { LevelDef } from '../level/building';
-import { attackPhase, isAlive, releaseTokensFor, weaponAttack } from '../sim/combat';
+import { attackPhase, currentMove, isAlive, releaseTokensFor } from '../sim/combat';
+import { preferredRange, usableRoutines } from './routines';
 import {
   EMPTY_INPUT, type BotMemory, type Fighter, type FloorId, type GameEvent, type InputFrame, type MatchState,
 } from '../sim/types';
@@ -11,7 +14,7 @@ const AI = TUNING.ai;
 
 export function createBotMemory(): BotMemory {
   return {
-    fsm: 'IDLE', targetId: -1, reactionReadyTick: 0, nextDecisionTick: 0, blockUntil: 0, wantAttack: null,
+    fsm: 'IDLE', targetId: -1, reactionReadyTick: 0, nextDecisionTick: 0, blockUntil: 0, blockLow: false, routine: [], routineStep: 0,
     retreatUntil: 0, retreatCooldownUntil: 0, bestCost: Infinity, lastProgressTick: 0, stuckLevel: 0, goalKey: '',
     prevUp: false,
   };
@@ -50,25 +53,22 @@ export function navInput(level: LevelDef, f: Fighter, goal: NavGoal, allowDrops:
   return { input, arrived: r.step.kind === 'arrived', cost: r.cost };
 }
 
-function attackReach(id: AttackId, f: Fighter): number {
-  // Hit if |dx| <= front offset + reach + victim half width.
-  return 0.3 + ATTACKS[id].reach * f.scale + 0.3;
+const PRESS_FIELD: Record<Button, keyof InputFrame> = {
+  P: 'punchPressed', K: 'kickPressed', H: 'heavyPressed', W: 'weaponPressed', S: 'specialPressed',
+};
+
+function press(input: InputFrame, b: Button) {
+  (input[PRESS_FIELD[b]] as boolean) = true;
 }
 
-function chooseAttack(state: MatchState, f: Fighter, dist: number): AttackId | null {
-  const weapon = weaponAttack(f);
-  const wWeapon = f.weapon === 'IRON_BAR' ? AI.barWeaponWeight : AI.attackWeights.WEAPON;
-  const all: { id: AttackId; w: number }[] = [
-    { id: 'PUNCH', w: AI.attackWeights.PUNCH },
-    { id: 'KICK', w: AI.attackWeights.KICK },
-    { id: weapon, w: wWeapon },
-  ];
-  const options = all.filter((o) => attackReach(o.id, f) - 0.1 >= dist);
+/** Pick a weighted combo routine that reaches the target from here. */
+function chooseRoutine(state: MatchState, f: Fighter, dist: number): readonly Button[] | null {
+  const options = usableRoutines(f, dist);
   if (!options.length) return null;
-  const total = options.reduce((s, o) => s + o.w, 0);
+  const total = options.reduce((s, o) => s + o.weight, 0);
   let r = nextRandom(state) * total;
-  for (const o of options) { r -= o.w; if (r <= 0) return o.id; }
-  return options[options.length - 1].id;
+  for (const o of options) { r -= o.weight; if (r <= 0) return o.buttons; }
+  return options[options.length - 1].buttons;
 }
 
 function visibleEnemies(state: MatchState, f: Fighter): Fighter[] {
@@ -198,9 +198,17 @@ export function computeAiInput(state: MatchState, f: Fighter, level: LevelDef, e
   }
   if (mem.fsm === 'DEAD') { mem.fsm = 'RESPAWN'; resetStuck(mem, tick); }
 
+  // Mid-combo: feed the next button of the routine when the chain window opens.
+  if (f.action === 'ATTACK' && mem.routineStep < mem.routine.length && inChainWindow(f)) {
+    press(input, mem.routine[mem.routineStep++]);
+    resetStuck(mem, tick);
+    return input;
+  }
   // Busy (stunned / attacking): the simulation controls the body.
   if (f.action !== 'NONE' && f.action !== 'BLOCK') { resetStuck(mem, tick); return input; }
-  if (tick < mem.blockUntil) { input.block = true; return input; }
+  mem.routine = [];
+  mem.routineStep = 0;
+  if (tick < mem.blockUntil) { input.block = true; input.down = mem.blockLow; return input; }
 
   const decide = tick >= mem.nextDecisionTick;
   if (decide) mem.nextDecisionTick = tick + AI.decisionInterval;
@@ -279,11 +287,20 @@ function fightInput(
 
   // Block reaction to an incoming attack.
   if (decide && target.action === 'ATTACK' && attackPhase(target) === 'startup' && target.facing === -towards) {
-    const def = ATTACKS[target.attackId!];
-    if (dist <= attackReach(def.id, target) + 0.4 && nextRandom(state) < AI.blockChance) {
-      mem.blockUntil = tick + (def.startup - target.actionTick) + def.active + 2;
-      input.block = true;
-      return input;
+    const def = currentMove(target);
+    if (def && dist <= 0.6 + def.hit.reach * target.scale + 0.4) {
+      const roll = nextRandom(state);
+      if (roll < AI.dodgeChance && f.stamina > 40 && f.mode === 'GROUND') {
+        input.dodgePressed = true;
+        return input;
+      }
+      if (roll < AI.dodgeChance + AI.blockChance) {
+        mem.blockUntil = tick + (def.frames.startup - target.actionTick) + def.frames.active + 2;
+        input.block = true;
+        mem.blockLow = def.hit.height === 'low';
+        input.down = mem.blockLow;
+        return input;
+      }
     }
   }
 
@@ -296,7 +313,7 @@ function fightInput(
     return input;
   }
 
-  const desired = 0.3 + 0.7 * ATTACKS[weaponAttack(f)].reach * f.scale;
+  const desired = preferredRange(f);
   if (dist > desired + 0.25) {
     moveAlong(f, towards, input, level);
     return input;
@@ -304,10 +321,12 @@ function fightInput(
   if (f.facing !== towards) { pressFacing(towards, input); return input; }
 
   if (decide && tick >= mem.reactionReadyTick && nextRandom(state) < AI.attackChancePerDecision) {
-    const id = chooseAttack(state, f, dist);
-    if (id === 'PUNCH') input.punchPressed = true;
-    else if (id === 'KICK') input.kickPressed = true;
-    else if (id) input.weaponPressed = true;
+    const routine = chooseRoutine(state, f, dist);
+    if (routine) {
+      mem.routine = [...routine];
+      mem.routineStep = 1;
+      press(input, routine[0]);
+    }
   }
   return input;
 }

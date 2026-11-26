@@ -9,7 +9,7 @@ const eslintConfig = defineConfig([
   // (no React, Next.js, renderer or browser-only modules) so it can run headless in
   // tests, soak runs and, later, on an authoritative online server.
   {
-    files: ["src/game/sim/**", "src/game/ai/**", "src/game/level/**", "src/game/config/**"],
+    files: ["src/game/sim/**", "src/game/ai/**", "src/game/level/**", "src/game/config/**", "src/game/combat/**", "src/game/net/protocol.ts", "src/game/net/codec.ts"],
     rules: {
       "no-restricted-imports": ["error", {
         patterns: [
@@ -20,7 +20,7 @@ const eslintConfig = defineConfig([
       "no-restricted-globals": ["error", "window", "document", "localStorage", "requestAnimationFrame"],
     },
   },
-  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts"]),
+  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts", "tools/mocap/.cache/**"]),
 ]);
 
 export default eslintConfig;

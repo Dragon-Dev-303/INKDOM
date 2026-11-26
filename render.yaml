@@ -1,0 +1,15 @@
+# Render blueprint for the game server (the Next.js app goes to Vercel). See docs/ONLINE.md.
+services:
+  - type: web
+    name: inkdom-game
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false

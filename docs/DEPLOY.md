@@ -28,13 +28,15 @@ The schema creates:
 
 Both are server-side only (no `NEXT_PUBLIC_` prefix), so they never reach the browser bundle. Locally they live in `.env.local`, which git ignores.
 
+> **Shop and payments** need more variables (`NEXT_PUBLIC_SUPABASE_*`, `SUPABASE_SECRET_KEY`, `SITE_URL`, Stripe and NOWPayments keys), the second migration, and webhook endpoints. See [PAYMENTS.md](PAYMENTS.md).
+
 ## 3. Deploy to Vercel (recommended)
 
 1. Push the repository to GitHub (`INKDOM`).
 2. In Vercel: **Add New → Project →** import the repository. Framework preset: Next.js (auto-detected).
 3. Add the two environment variables above (Production and Preview).
 4. Deploy. Vercel runs `npm install` and `npm run build`.
-5. Check `https://<your-app>/api/health`. It should return `{"ok":true,…,"storage":"configured"}`.
+5. Check `https://<your-app>/api/health`. It should return `{"ok":true,…,"storage":"configured"}`, plus `auth`, `wallet` and `payments` flags.
 6. Play one match with "Share anonymous match stats" on, then confirm a row appears in `match_logs`.
 
 ## 4. Other hosts

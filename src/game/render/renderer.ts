@@ -1,10 +1,16 @@
-import { CONTROL_LABELS } from '../config/controls';
+import { CONTROL_LABELS, type controlLabels } from '../config/controls';
+import { getMove } from '../combat/moves';
 import { TUNING } from '../config/tuning';
 import type { LevelDef } from '../level/building';
-import { hitbox, hurtbox, isAlive } from '../sim/combat';
+import type { ResolvedCosmetics, WeaponStyle } from '../config/shop';
+import { attackPhase, hitbox, hurtbox, isAlive } from '../sim/combat';
 import type { Fighter, MatchState, Team } from '../sim/types';
 import type { Fx } from './fx';
-import { poseFor, solveRig, WEAPON_LENGTH, type Joints, type Vec } from './rig';
+import { drawHat } from './cosmetics';
+import { mixPose, poseFor, solveRig, WEAPON_LENGTH, type Joints, type Pose, type Vec } from './rig';
+
+/** Frames used to crossfade between animation states (mocap clips start from varied stances). */
+const BLEND_TICKS = 4;
 
 export interface Palette { attacker: string; defender: string; attackerDark: string; defenderDark: string; outline: number }
 
@@ -27,6 +33,12 @@ export interface RenderOptions {
   banners: Banner[];
   toasts: Toast[];
   smallWindow: boolean;
+  /** Cosmetic loadout per player index (0 = P1, 1 = P2); applied to that player's boss only. */
+  cosmetics?: readonly (ResolvedCosmetics | null)[];
+  /** Key hints per player (defaults to the local two-player layouts). */
+  controlHints?: readonly (ReturnType<typeof controlLabels> | null)[];
+  /** Player names shown in the HUD (online). */
+  playerNames?: readonly (string | null)[];
 }
 
 const COLORS = {
@@ -58,6 +70,9 @@ export class Renderer {
   private scale = 1;
   private ox = 0;
   private oy = 0;
+  private fx: Fx | null = null;
+  /** Render-side pose memory per fighter for crossfades (never read by the simulation). */
+  private poseMemory = new Map<number, { key: string; from: Pose; since: number; last: Pose }>();
 
   constructor(private canvas: HTMLCanvasElement, private level: LevelDef) {
     const ctx = canvas.getContext('2d');
@@ -77,7 +92,7 @@ export class Renderer {
     const cw = cam.x1 - cam.x0;
     const ch = cam.y1 - cam.y0;
     // Leave room for the HUD bands at the top and bottom.
-    const hudTop = 0.13 * this.h;
+    const hudTop = 0.15 * this.h;
     const hudBottom = 0.07 * this.h;
     const availH = this.h - hudTop - hudBottom;
     this.scale = Math.min(this.w / cw, availH / ch);
@@ -88,8 +103,12 @@ export class Renderer {
   private sx(x: number) { return this.ox + x * this.scale; }
   private sy(y: number) { return this.oy - y * this.scale; }
 
+  private names: readonly (string | null)[] | undefined;
+
   render(state: MatchState, alpha: number, fx: Fx, opt: RenderOptions): void {
     const ctx = this.ctx;
+    this.names = opt.playerNames;
+    this.fx = fx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = COLORS.letterbox;
     ctx.fillRect(0, 0, this.w, this.h);
@@ -244,11 +263,12 @@ export class Renderer {
     const dark = f.team === 'ATTACKER' ? pal.attackerDark : pal.defenderDark;
     const front = flashing ? '#FFFFFF' : base;
     const back = flashing ? '#DDDDDD' : dark;
-    const pose = poseFor(f, state.tick);
+    const pose = this.blendedPose(f, poseFor(f, state.tick), state.tick);
     const grounded = f.mode === 'GROUND' || f.mode === 'STAIR';
     const j = solveRig(pose, f.scale, grounded, WEAPON_LENGTH[f.weapon]);
     const W = (p: Vec): Vec => ({ x: x + f.facing * p.x, y: y + p.y });
-    const thick = (f.isBoss ? 0.09 : 0.07) * (f.isBoss ? 1 : 1);
+    const thick = f.isBoss ? 0.09 : 0.07;
+    const cos = f.isBoss && f.playerIndex >= 0 ? opt.cosmetics?.[f.playerIndex] ?? null : null;
 
     ctx.save();
     ctx.globalAlpha = a;
@@ -274,28 +294,73 @@ export class Renderer {
     ctx.lineWidth = Math.max(1.5, thick * this.scale);
     ctx.strokeStyle = front;
     ctx.stroke();
+    if (cos?.hat) drawHat(ctx, this.sx(h.x), this.sy(h.y), 0.18 * f.scale * this.scale, f.facing, cos.hat);
     // Weapon then front arm (hand over handle).
-    this.drawWeapon(f, W(j.handF), W(j.weaponTip));
+    const tip = W(j.weaponTip);
+    if (f.weapon !== 'FISTS') this.drawWeapon(f, W(j.handF), tip, cos?.weapon ?? null);
+    if (cos?.trail && this.fx && isAlive(f) && attackPhase(f) === 'active') {
+      const m = getMove(f.moveId);
+      const kick = m?.category === 'kick' || !!m?.id.includes('kick') || m?.id === 'knee' || m?.id === 'sweep';
+      const end = f.weapon !== 'FISTS' && m?.category === 'weapon' ? tip : W(kick ? j.footF : j.handF);
+      this.fx.trail(end.x, end.y, cos.trail.colors);
+    }
     seg(j.shoulder, j.elbowF, front); seg(j.elbowF, j.handF, front);
     ctx.restore();
 
     if (isAlive(f)) this.drawMarkers(state, f, x, y, j, opt, a);
+    if (f.comboHits >= 2 && isAlive(f)) {
+      ctx.save();
+      ctx.font = `900 ${Math.max(12, 0.42 * this.scale)}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#000';
+      ctx.fillStyle = '#F4D35E';
+      const ty = this.sy(y + 2.75 * f.scale);
+      ctx.strokeText(`${f.comboHits} HITS`, this.sx(x), ty);
+      ctx.fillText(`${f.comboHits} HITS`, this.sx(x), ty);
+      ctx.restore();
+    }
   }
 
-  private drawWeapon(f: Fighter, hand: Vec, tip: Vec) {
+  private blendedPose(f: Fighter, target: Pose, tick: number): Pose {
+    const key = `${f.action}:${f.moveId ?? ''}:${f.mode === 'AIR' ? 'air' : ''}${f.crouching ? 'c' : ''}`;
+    let m = this.poseMemory.get(f.id);
+    if (!m || tick < m.since) {
+      m = { key, from: target, since: tick, last: target };
+      this.poseMemory.set(f.id, m);
+    } else if (m.key !== key) {
+      m.key = key;
+      m.from = m.last;
+      m.since = tick;
+    }
+    const t = Math.min(1, (tick - m.since) / BLEND_TICKS);
+    const out = t >= 1 || f.action === 'DEAD' ? target : mixPose(m.from, target, t * t * (3 - 2 * t));
+    m.last = out;
+    return out;
+  }
+
+  private drawWeapon(f: Fighter, hand: Vec, tip: Vec, skin: WeaponStyle | null = null) {
+    const ctx = this.ctx;
+    if (skin?.glow) {
+      ctx.save();
+      ctx.shadowColor = skin.glow;
+      ctx.shadowBlur = 0.25 * this.scale;
+    }
     if (f.weapon === 'IRON_BAR') {
-      this.line(hand, tip, 0.07, '#8b93a1');
+      this.line(hand, tip, 0.07, skin?.bar ?? '#8b93a1');
+      if (skin?.glow) ctx.restore();
       return;
     }
     // Sword: short hilt behind the hand, blade forward.
     const dx = tip.x - hand.x;
     const dy = tip.y - hand.y;
     const guard = { x: hand.x + dx * 0.18, y: hand.y + dy * 0.18 };
-    this.line(hand, guard, 0.06, '#7a5230');
-    this.line(guard, tip, 0.05, '#e5e7eb');
+    this.line(hand, guard, 0.06, skin?.hilt ?? '#7a5230');
+    this.line(guard, tip, 0.05, skin?.blade ?? '#e5e7eb');
     const nx = -dy * 0.12;
     const ny = dx * 0.12;
-    this.line({ x: guard.x - nx, y: guard.y - ny }, { x: guard.x + nx, y: guard.y + ny }, 0.05, '#c9a227');
+    this.line({ x: guard.x - nx, y: guard.y - ny }, { x: guard.x + nx, y: guard.y + ny }, 0.05, skin?.guard ?? '#c9a227');
+    if (skin?.glow) ctx.restore();
   }
 
   private drawMarkers(state: MatchState, f: Fighter, x: number, y: number, j: Joints, opt: RenderOptions, a: number) {
@@ -516,14 +581,15 @@ export class Renderer {
     const boss = state.fighters.find((f) => f.team === team && f.isBoss)!;
     const bots = state.fighters.filter((f) => f.team === team && !f.isBoss);
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    roundRect(ctx, x, y, pw, fs * 4.4, 8);
+    roundRect(ctx, x, y, pw, fs * 5.1, 8);
     ctx.fill();
     ctx.textAlign = 'left';
     ctx.font = `800 ${fs}px system-ui, sans-serif`;
     ctx.fillStyle = color;
     const shape = team === 'ATTACKER' ? '▲' : '■';
     const ctrl = state.config.controllers[boss.playerIndex as 0 | 1];
-    const who = ctrl === 'CPU' ? 'CPU' : `P${boss.playerIndex + 1}`;
+    const name = this.names?.[boss.playerIndex as 0 | 1];
+    const who = ctrl === 'CPU' ? 'CPU' : name ? name : `P${boss.playerIndex + 1}`;
     ctx.fillText(`${shape} ${team === 'ATTACKER' ? 'ATTACKERS' : 'DEFENDERS'} · ${who}`, x + 10, y + fs * 0.9);
 
     const barX = x + 10;
@@ -538,8 +604,23 @@ export class Renderer {
     const bossText = isAlive(boss) ? `${Math.ceil(boss.hp)}/${boss.maxHp}` : `KO — respawn ${Math.max(0, Math.ceil((boss.respawnAt - state.tick) / 60))}`;
     ctx.fillText(bossText, barX + 6, barY + fs * 0.47);
 
+    // Stamina (green) and energy (violet) gauges.
+    const gY = y + fs * 2.95;
+    const gW = (barW - 8) / 2;
+    const gauge = (gx: number, frac: number, col: string, label: string) => {
+      ctx.fillStyle = '#1f2937';
+      ctx.fillRect(gx, gY, gW, fs * 0.38);
+      ctx.fillStyle = col;
+      ctx.fillRect(gx, gY, gW * Math.max(0, Math.min(1, frac)), fs * 0.38);
+      ctx.fillStyle = COLORS.muted;
+      ctx.font = `700 ${fs * 0.5}px system-ui, sans-serif`;
+      ctx.fillText(label, gx, gY - fs * 0.25);
+    };
+    gauge(barX, boss.stamina / TUNING.combat.stamina.max, '#34d399', 'STAMINA');
+    gauge(barX + gW + 8, boss.energy / TUNING.combat.energy.max, boss.energy >= 50 ? '#c084fc' : '#7c3aed', 'ENERGY');
+
     const pipW = (barW - 2 * 8) / 3;
-    const pipY = y + fs * 3.1;
+    const pipY = y + fs * 3.95;
     bots.forEach((b, i) => {
       const px = barX + i * (pipW + 8);
       ctx.fillStyle = '#1f2937';
@@ -558,19 +639,22 @@ export class Renderer {
     const boss = state.fighters.find((f) => f.isBoss && f.playerIndex === player)!;
     const ctrl = state.config.controllers[player];
     const color = boss.team === 'ATTACKER' ? opt.palette.attacker : opt.palette.defender;
-    const L = player === 0 ? CONTROL_LABELS.p1 : CONTROL_LABELS.p2;
+    // Online: only the local player's hints are given (null = don't show).
+    const L = opt.controlHints ? opt.controlHints[player] : (player === 0 ? CONTROL_LABELS.p1 : CONTROL_LABELS.p2);
     const cmd = state.squads[boss.team].command;
-    const weapon = boss.weapon === 'IRON_BAR' ? 'IRON BAR' : 'SWORD';
+    const weapon = boss.weapon === 'IRON_BAR' ? 'IRON BAR' : boss.weapon === 'SHORT_SWORD' ? 'SWORD' : 'FISTS';
+    const who = this.names?.[player] ?? `P${player + 1}`;
     const main = ctrl === 'CPU'
       ? `CPU · ${boss.team} · squad ${cmd} · ${weapon}`
-      : `P${player + 1} · squad ${cmd} [${L.command}] · ${weapon}`;
-    const hint = `${L.move} move · ${L.jumpClimb} jump/climb · ${L.down} down · ${L.punch} punch · ${L.kick} kick · ${L.weapon} weapon · ${L.block} block`;
+      : `${who} · squad ${cmd}${L ? ` [${L.command}]` : ''} · ${weapon}`;
+    const hint = !L ? '' : `${L.move} move · ${L.jumpClimb} jump · ${L.down} crouch · ${L.punch} punch · ${L.kick} kick · ${L.heavy} heavy · ${L.weapon} ${boss.weapon === 'FISTS' ? 'elbow' : 'weapon'} · ${L.special} special · ${L.block} block · ${L.dodge} dodge`;
     const x = player === 0 ? 12 : this.w - 12;
     ctx.textAlign = player === 0 ? 'left' : 'right';
     ctx.font = `800 ${fs * 0.85}px system-ui, sans-serif`;
     ctx.fillStyle = color;
-    ctx.fillText(main, x, this.h - fs * (opt.showHints && ctrl === 'HUMAN' ? 2.0 : 1.0));
-    if (opt.showHints && ctrl === 'HUMAN') {
+    const showHint = opt.showHints && ctrl === 'HUMAN' && !!hint;
+    ctx.fillText(main, x, this.h - fs * (showHint ? 2.0 : 1.0));
+    if (showHint) {
       ctx.font = `500 ${fs * 0.68}px system-ui, sans-serif`;
       ctx.fillStyle = COLORS.muted;
       ctx.fillText(hint, x, this.h - fs * 0.85);

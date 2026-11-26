@@ -1,4 +1,7 @@
-import { ATTACKS } from '../config/tuning';
+import { ARMED_IDLE, BLOCK_HIGH, BLOCK_LOW, CROUCH, DODGE, GUARD, GUARDBREAK, HIT_HIGH, HIT_LOW, HIT_MID, LAUNCHED, LYING } from '../anim/authored';
+import { moveClipTime, sampleClip } from '../anim/clips';
+import { allClipIds, getClip } from '../anim/library';
+import { getMove } from '../combat/moves';
 import type { Fighter } from '../sim/types';
 
 /**
@@ -35,31 +38,6 @@ export interface Joints {
   weaponTip: Vec; weaponAngle: number;
 }
 
-const IDLE: Pose = { torso: 0.05, neck: 0, aF: 0.35, eF: 0.9, aB: -0.15, eB: 0.5, hF: 0.12, kF: 0.12, hB: -0.12, kB: 0.12, wpn: -1.1, lie: 0, drop: 0 };
-
-const P = (over: Partial<Pose>): Pose => ({ ...IDLE, ...over });
-
-const ATTACK_POSES = {
-  PUNCH: { wind: P({ aF: -0.4, eF: 2.3, torso: -0.05, aB: 0.6, eB: 1.8 }), ext: P({ aF: 1.55, eF: 0.05, torso: 0.25, aB: -0.4, eB: 1.6 }) },
-  KICK: {
-    wind: P({ hF: 1.2, kF: 1.9, torso: -0.15, aF: 0.8, aB: -0.6 }),
-    ext: P({ hF: 1.55, kF: 0.05, torso: -0.3, hB: -0.05, kB: 0.1, aF: 0.6, aB: -0.9 }),
-  },
-  IRON_BAR: {
-    wind: P({ aF: 3.5, eF: 0.3, aB: 3.3, eB: 0.5, torso: -0.15, wpn: 0 }),
-    ext: P({ aF: 1.0, eF: 0.1, aB: 0.9, eB: 0.2, torso: 0.35, hF: 0.45, kF: 0.5, wpn: 0 }),
-  },
-  SHORT_SWORD: {
-    wind: P({ aF: -0.7, eF: 1.0, torso: -0.1, wpn: 0.2 }),
-    ext: P({ aF: 1.65, eF: 0.05, torso: 0.3, hF: 0.45, kF: 0.4, wpn: 0 }),
-  },
-} as const;
-
-const BLOCK = P({ aF: 1.3, eF: 1.9, aB: 1.1, eB: 2.0, torso: -0.05, drop: 0.08, hF: 0.25, kF: 0.5, hB: -0.25, kB: 0.5, wpn: -1.6 });
-const HIT = P({ torso: -0.4, neck: -0.3, aF: -0.6, eF: 0.6, aB: 0.9, eB: 0.4, hF: 0.3, kF: 0.4, hB: -0.3, kB: 0.3 });
-const GUARDBREAK = P({ torso: -0.5, neck: -0.2, aF: 2.4, eF: 0.4, aB: 2.6, eB: 0.4, hF: 0.35, kF: 0.6, hB: -0.35, kB: 0.4 });
-const LYING = P({ torso: 0, aF: 0.9, eF: 0.3, aB: 1.6, eB: 0.2, hF: 0.15, kF: 0.4, hB: -0.1, kB: 0.1, lie: 1 });
-
 const ease = (t: number) => (t < 0 ? 0 : t > 1 ? 1 : t * t * (3 - 2 * t));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
@@ -69,37 +47,59 @@ export function mixPose(a: Pose, b: Pose, t: number): Pose {
   return o;
 }
 
-function runPose(stride: number, cycleLen: number, lean: number): Pose {
+/** Base stance: boxing guard when unarmed, weapon stance when armed. */
+export const baseStance = (f: Pick<Fighter, 'weapon'>): Pose => (f.weapon === 'FISTS' ? GUARD : ARMED_IDLE);
+const over = (base: Pose, p: Partial<Pose>): Pose => ({ ...base, ...p });
+
+function runPose(base: Pose, stride: number, cycleLen: number, lean: number, unarmed: boolean): Pose {
   const p = (stride / cycleLen) * Math.PI * 2;
   const s = Math.sin(p);
-  return P({
+  return over(base, {
     torso: lean,
     hF: 0.55 * s, kF: 0.2 + 0.9 * Math.max(0, Math.cos(p)),
     hB: -0.55 * s, kB: 0.2 + 0.9 * Math.max(0, -Math.cos(p)),
-    aF: -0.6 * s + 0.2, eF: 1.2, aB: 0.6 * s - 0.1, eB: 1.2,
+    drop: 0,
+    ...(unarmed
+      ? { aF: base.aF - 0.25 * s, aB: base.aB + 0.25 * s }
+      : { aF: -0.6 * s + 0.2, eF: 1.2, aB: 0.6 * s - 0.1, eB: 1.2 }),
   });
 }
 
-/** Pose for a fighter at the current simulation tick. */
+function reactionPose(f: Fighter): Partial<Pose> {
+  switch (f.reaction) {
+    case 'mid': return HIT_MID;
+    case 'low': return HIT_LOW;
+    case 'launch': return LAUNCHED;
+    default: return HIT_HIGH;
+  }
+}
+
+/** Pose for a fighter at the current simulation tick (render-only; never feeds back into the sim). */
 export function poseFor(f: Fighter, tick: number): Pose {
   const t = f.actionTick;
+  const base = baseStance(f);
+  const unarmed = f.weapon === 'FISTS';
   switch (f.action) {
-    case 'DEAD': return mixPose(HIT, LYING, ease(t / 20));
-    case 'KNOCKDOWN': return mixPose(HIT, LYING, ease(t / 10));
-    case 'GETUP': return mixPose(LYING, IDLE, ease(t / Math.max(1, f.actionDuration)));
-    case 'HITSTUN': return mixPose(HIT, IDLE, ease((t - f.actionDuration * 0.5) / (f.actionDuration * 0.5)));
-    case 'BLOCKSTUN': return mixPose(BLOCK, P({ ...BLOCK, torso: -0.2 }), 0.6);
-    case 'GUARDBREAK': return GUARDBREAK;
-    case 'BLOCK': return mixPose(IDLE, BLOCK, ease(t / 3));
+    case 'DEAD': return mixPose(over(base, HIT_HIGH), over(base, LYING), ease(t / 20));
+    case 'KNOCKDOWN': return mixPose(over(base, reactionPose(f)), over(base, LYING), ease(t / 10));
+    case 'GETUP': return mixPose(over(base, LYING), base, ease(t / Math.max(1, f.actionDuration)));
+    case 'HITSTUN': {
+      if (f.reaction === 'launch' && f.mode === 'AIR') return over(base, LAUNCHED);
+      return mixPose(over(base, reactionPose(f)), base, ease((t - f.actionDuration * 0.5) / (f.actionDuration * 0.5)));
+    }
+    case 'BLOCKSTUN': {
+      const blk = over(base, f.crouching ? BLOCK_LOW : BLOCK_HIGH);
+      return mixPose(blk, { ...blk, torso: blk.torso - 0.2 }, 0.6);
+    }
+    case 'GUARDBREAK': return over(base, GUARDBREAK);
+    case 'BLOCK': return mixPose(base, over(base, f.crouching ? BLOCK_LOW : BLOCK_HIGH), ease(t / 3));
+    case 'DODGE': return mixPose(over(base, DODGE), base, ease((t - 8) / 6));
     case 'ATTACK': {
-      if (!f.attackId) break;
-      const def = ATTACKS[f.attackId];
-      const poses = ATTACK_POSES[f.attackId];
-      let pose: Pose;
-      if (t < def.startup) pose = mixPose(IDLE, poses.wind, ease(t / def.startup));
-      else if (t < def.startup + def.active) pose = mixPose(poses.wind, poses.ext, ease((t - def.startup + 1) / 2));
-      else pose = mixPose(poses.ext, IDLE, ease((t - def.startup - def.active) / def.recovery));
-      if (f.mode === 'AIR' && f.attackId !== 'KICK') pose = { ...pose, hF: 0.7, kF: 1.2, hB: -0.1, kB: 0.6 };
+      const m = getMove(f.moveId);
+      const clip = m ? getClip(m.clip) : null;
+      if (!m || !clip) break;
+      let pose = sampleClip(clip, moveClipTime(m.frames, t, clip), base);
+      if (f.mode === 'AIR' && m.trigger?.air !== 'air' && m.category !== 'kick') pose = { ...pose, hF: 0.7, kF: 1.2, hB: -0.1, kB: 0.6 };
       return pose;
     }
     default: break;
@@ -107,21 +107,26 @@ export function poseFor(f: Fighter, tick: number): Pose {
   if (f.mode === 'LADDER') {
     const p = (f.stride / 0.8) * Math.PI * 2;
     const s = Math.sin(p);
-    return P({ torso: 0, aF: 2.7 + 0.25 * s, eF: 0.6, aB: 2.7 - 0.25 * s, eB: 0.6, hF: 0.9 + 0.3 * s, kF: 1.4, hB: 0.9 - 0.3 * s, kB: 1.4, wpn: 0.8 });
+    return over(base, { torso: 0, drop: 0, aF: 2.7 + 0.25 * s, eF: 0.6, aB: 2.7 - 0.25 * s, eB: 0.6, hF: 0.9 + 0.3 * s, kF: 1.4, hB: 0.9 - 0.3 * s, kB: 1.4, wpn: 0.8 });
   }
   if (f.mode === 'AIR') {
     return f.vel.y > 0
-      ? P({ hF: 0.7, kF: 1.3, hB: -0.1, kB: 0.5, aF: 2.2, eF: 0.4, aB: 2.0, eB: 0.4 })
-      : P({ hF: 0.3, kF: 0.3, hB: -0.2, kB: 0.2, aF: 2.4, eF: 0.3, aB: 2.2, eB: 0.3 });
+      ? over(base, { drop: 0, hF: 0.7, kF: 1.3, hB: -0.1, kB: 0.5, aF: 2.2, eF: 0.4, aB: 2.0, eB: 0.4 })
+      : over(base, { drop: 0, hF: 0.3, kF: 0.3, hB: -0.2, kB: 0.2, aF: 2.4, eF: 0.3, aB: 2.2, eB: 0.3 });
   }
+  if (f.crouching) return over(base, CROUCH);
   if (f.mode === 'STAIR') {
-    if (Math.abs(f.vel.x) > 0.1) return runPose(f.stride, 1.2, 0.15);
-    return IDLE;
+    if (Math.abs(f.vel.x) > 0.1) return runPose(base, f.stride, 1.2, 0.15, unarmed);
+    return base;
   }
-  if (Math.abs(f.vel.x) > 0.3) return runPose(f.stride, 1.6, 0.2);
+  if (Math.abs(f.vel.x) > 0.3) return runPose(base, f.stride, 1.6, 0.2, unarmed);
+  if (unarmed) {
+    const idle = getClip('guard_idle');
+    if (idle) return sampleClip(idle, tick / 80, base);
+  }
   // Idle breathing.
   const b = Math.sin((tick / 72) * Math.PI * 2) * 0.03;
-  return P({ torso: 0.05 + b, aF: 0.35 + b, aB: -0.15 - b });
+  return over(base, { torso: 0.05 + b, aF: 0.35 + b, aB: -0.15 - b });
 }
 
 const limb = (from: Vec, len: number, ang: number): Vec => ({ x: from.x + len * Math.sin(ang), y: from.y - len * Math.cos(ang) });
@@ -188,13 +193,17 @@ function mapJoints(j: Joints, fn: (p: Vec) => Vec): Joints {
   };
 }
 
-export const WEAPON_LENGTH = { IRON_BAR: 0.9, SHORT_SWORD: 0.75 } as const;
+export const WEAPON_LENGTH = { FISTS: 0, IRON_BAR: 0.9, SHORT_SWORD: 0.75 } as const;
 
-/** All pose clips used by the game — exercised by the rig sanity test. */
-export const ALL_STATIC_POSES: Record<string, Pose> = {
-  IDLE, BLOCK, HIT, GUARDBREAK, LYING,
-  PUNCH_WIND: ATTACK_POSES.PUNCH.wind, PUNCH_EXT: ATTACK_POSES.PUNCH.ext,
-  KICK_WIND: ATTACK_POSES.KICK.wind, KICK_EXT: ATTACK_POSES.KICK.ext,
-  BAR_WIND: ATTACK_POSES.IRON_BAR.wind, BAR_EXT: ATTACK_POSES.IRON_BAR.ext,
-  SWORD_WIND: ATTACK_POSES.SHORT_SWORD.wind, SWORD_EXT: ATTACK_POSES.SHORT_SWORD.ext,
-};
+/** Every pose the game can show (stances, reactions and every clip's keys) — exercised by the rig sanity test. */
+export function allStaticPoses(): Record<string, Pose> {
+  const out: Record<string, Pose> = { GUARD, ARMED_IDLE };
+  const partials: Record<string, Partial<Pose>> = { CROUCH, BLOCK_HIGH, BLOCK_LOW, DODGE, HIT_HIGH, HIT_MID, HIT_LOW, LAUNCHED, GUARDBREAK, LYING };
+  for (const [k, p] of Object.entries(partials)) { out[k] = over(GUARD, p); out[k + '_ARMED'] = over(ARMED_IDLE, p); }
+  for (const id of allClipIds()) {
+    const clip = getClip(id);
+    if (!clip) continue;
+    for (let i = 0; i <= 20; i++) out[id + '@' + i] = sampleClip(clip, i / 20, GUARD);
+  }
+  return out;
+}

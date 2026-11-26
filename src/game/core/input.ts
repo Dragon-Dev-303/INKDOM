@@ -10,6 +10,11 @@ export class KeyboardInput {
   private down = new Set<string>();
   private pressed = new Set<string>();
   private gameKeys = allGameKeyCodes();
+
+  /** Also swallow (preventDefault) custom-bound keys. */
+  setExtraBindings(list: import('../config/controls').Bindings[]): void {
+    this.gameKeys = allGameKeyCodes(list);
+  }
   private listeners: Array<[EventTarget, string, EventListener]> = [];
   onGlobalKey: ((code: string) => void) | null = null;
 
@@ -69,8 +74,11 @@ export class KeyboardInput {
       jumpPressed: this.tapped(b.up),
       punchPressed: this.tapped(b.punch),
       kickPressed: this.tapped(b.kick),
+      heavyPressed: this.tapped(b.heavy),
       weaponPressed: this.tapped(b.weapon),
+      specialPressed: this.tapped(b.special),
       block: this.held(b.block),
+      dodgePressed: this.tapped(b.dodge),
       commandPressed: this.tapped(b.command),
     };
   }

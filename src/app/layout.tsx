@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from 'next';
+import { AccountProvider } from '@/lib/account/AccountContext';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Inkdom (Beta)',
-  description: 'Local two-player stickman building siege. Capture the rooftop flag or hold the building.',
+  title: 'Inkdom',
+  description: 'Stickman building sieges: fight as a boss, command a squad, capture the rooftop flag. Local and online.',
 };
 
 export const viewport: Viewport = {
@@ -13,7 +14,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AccountProvider>{children}</AccountProvider>
+      </body>
     </html>
   );
 }

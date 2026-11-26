@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ATTACKS } from '@/game/config/tuning';
-import { ALL_STATIC_POSES, BONES, poseFor, solveRig, type Joints } from '@/game/render/rig';
+import { MOVES, moveTotal } from '@/game/combat/moves';
+import { allStaticPoses, BONES, poseFor, solveRig, type Joints } from '@/game/render/rig';
 import type { ActionState, Fighter, Mode } from '@/game/sim/types';
 import { duelState, P1 } from './helpers';
 
@@ -25,7 +25,7 @@ function checkJoints(j: Joints, scale: number, label: string) {
 
 describe('stickman rig sanity (no disconnected limbs)', () => {
   it('keeps every bone length constant for all static poses', () => {
-    for (const [name, pose] of Object.entries(ALL_STATIC_POSES)) {
+    for (const [name, pose] of Object.entries(allStaticPoses())) {
       for (const scale of [1, 1.15]) checkJoints(solveRig(pose, scale, true, 0.75), scale, name);
     }
   });
@@ -33,7 +33,7 @@ describe('stickman rig sanity (no disconnected limbs)', () => {
   it('keeps bone lengths for runtime poses across every action and mode', () => {
     const s = duelState();
     const f: Fighter = P1(s);
-    const actions: ActionState[] = ['NONE', 'BLOCK', 'BLOCKSTUN', 'GUARDBREAK', 'HITSTUN', 'KNOCKDOWN', 'GETUP', 'DEAD'];
+    const actions: ActionState[] = ['NONE', 'BLOCK', 'BLOCKSTUN', 'GUARDBREAK', 'HITSTUN', 'KNOCKDOWN', 'GETUP', 'DODGE', 'DEAD'];
     const modes: Mode[] = ['GROUND', 'AIR', 'STAIR', 'LADDER'];
     for (const action of actions) {
       for (const mode of modes) {
@@ -43,19 +43,24 @@ describe('stickman rig sanity (no disconnected limbs)', () => {
         }
       }
     }
-    for (const id of Object.keys(ATTACKS) as (keyof typeof ATTACKS)[]) {
-      const def = ATTACKS[id];
-      for (let t = 0; t < def.startup + def.active + def.recovery; t++) {
-        Object.assign(f, { action: 'ATTACK', attackId: id, mode: 'GROUND', actionTick: t, actionDuration: 99 });
-        checkJoints(solveRig(poseFor(f, t), f.scale, true, 0.9), f.scale, `${id}/${t}`);
+    for (const weapon of ['FISTS', 'SHORT_SWORD', 'IRON_BAR'] as const) {
+      for (const m of MOVES) {
+        for (let t = 0; t < moveTotal(m); t++) {
+          Object.assign(f, { weapon, action: 'ATTACK', moveId: m.id, mode: 'GROUND', crouching: false, actionTick: t, actionDuration: 99 });
+          checkJoints(solveRig(poseFor(f, t), f.scale, true, 0.9), f.scale, m.id + "/" + weapon + "/" + t);
+        }
       }
+    }
+    for (const reaction of ['high', 'mid', 'low', 'launch'] as const) {
+      Object.assign(f, { action: 'HITSTUN', reaction, actionTick: 3, actionDuration: 20 });
+      checkJoints(solveRig(poseFor(f, 3), f.scale, true, 0.9), f.scale, reaction);
     }
   });
 
   it('standing poses keep the head above the hips and feet on the ground', () => {
-    const j = solveRig(ALL_STATIC_POSES.IDLE, 1, true, 0.75);
+    const j = solveRig(allStaticPoses().GUARD, 1, true, 0.75);
     expect(j.head.y).toBeGreaterThan(j.hip.y);
     expect(Math.min(j.footF.y, j.footB.y)).toBeCloseTo(0, 6);
-    expect(j.head.y + BONES.headR).toBeGreaterThan(1.7);
+    expect(j.head.y + BONES.headR).toBeGreaterThan(1.6);
   });
 });

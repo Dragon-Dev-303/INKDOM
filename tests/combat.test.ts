@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ATTACKS, TUNING } from '@/game/config/tuning';
+import { TUNING } from '@/game/config/tuning';
+import { getMove } from '@/game/combat/moves';
 import { hitbox } from '@/game/sim/combat';
 import { stepMatch } from '@/game/sim/match';
 import type { GameEvent } from '@/game/sim/types';
@@ -15,10 +16,11 @@ function setup() {
   return { s, a, d };
 }
 
+const JAB = getMove('jab')!;
 describe('attack timing', () => {
   it('punch hitbox exists only during its active frames', () => {
     const { s, a } = setup();
-    const def = ATTACKS.PUNCH;
+    const def = JAB.frames;
     const active: number[] = [];
     const events: GameEvent[] = [];
     for (let t = 0; t < def.startup + def.active + def.recovery + 2; t++) {
@@ -31,10 +33,10 @@ describe('attack timing', () => {
 
   it('applies damage, hit-stun, knockback and hit-stop on a clean punch', () => {
     const { s, a, d } = setup();
-    const events = run(s, 8, (t) => input({ punchPressed: t === 0 }));
+    const events = run(s, JAB.frames.startup + 1, (t) => input({ punchPressed: t === 0 }));
     const hit = events.find((e) => e.type === 'HIT');
     expect(hit).toBeDefined();
-    expect(d.hp).toBe(d.maxHp - ATTACKS.PUNCH.damage);
+    expect(d.hp).toBe(d.maxHp - JAB.hit.damage);
     expect(d.action).toBe('HITSTUN');
     expect(d.vel.x).toBeGreaterThan(0);
     expect(a.hitstop + d.hitstop).toBeGreaterThan(0);
@@ -44,7 +46,7 @@ describe('attack timing', () => {
     const { s, d } = setup();
     const events = run(s, 40, (t) => input({ punchPressed: t === 0 }));
     expect(events.filter((e) => e.type === 'HIT').length).toBe(1);
-    expect(d.hp).toBe(d.maxHp - ATTACKS.PUNCH.damage);
+    expect(d.hp).toBe(d.maxHp - JAB.hit.damage);
   });
 
   it('trades: two simultaneous punches both land', () => {
@@ -60,7 +62,7 @@ describe('blocking', () => {
     const { s, d } = setup();
     run(s, 5, input(), input({ block: true }));
     run(s, 12, (t) => input({ punchPressed: t === 0 }), input({ block: true }));
-    expect(d.hp).toBeCloseTo(d.maxHp - ATTACKS.PUNCH.damage * TUNING.combat.block.chip, 5);
+    expect(d.hp).toBeCloseTo(d.maxHp - JAB.hit.damage * TUNING.combat.block.chip, 5);
   });
 
   it('hits from behind ignore block', () => {
@@ -69,7 +71,7 @@ describe('blocking', () => {
     run(s, 5, input(), input({ block: true }));
     // Keep facing away: block roots and does not turn.
     run(s, 12, (t) => input({ punchPressed: t === 0 }), input({ block: true }));
-    expect(d.hp).toBe(d.maxHp - ATTACKS.PUNCH.damage);
+    expect(d.hp).toBe(d.maxHp - JAB.hit.damage);
   });
 
   it('the iron bar breaks a block', () => {
@@ -89,7 +91,7 @@ describe('stagger, KO and respawn', () => {
   it('repeated hits knock the target down, then give get-up invulnerability', () => {
     const { s, d } = setup();
     let saw = false;
-    run(s, 200, (t) => input({ right: true, punchPressed: t % 20 === 0 }), () => {
+    run(s, 400, (t) => input({ right: true, punchPressed: t % 20 === 0 }), () => {
       if (d.action === 'KNOCKDOWN') saw = true;
       return input();
     });
@@ -138,11 +140,11 @@ describe('stagger, KO and respawn', () => {
     P1(s).pos = { x: -10, y: 0 };
     // Drive the bot attack directly through its fighter state.
     bot.action = 'ATTACK';
-    bot.attackId = 'PUNCH';
+    bot.moveId = 'jab';
     bot.actionTick = 0;
     bot.actionDuration = 17;
     bot.attackHitIds = [];
     run(s, 8);
-    expect(d.hp).toBeCloseTo(d.maxHp - ATTACKS.PUNCH.damage * TUNING.combat.botDamageMultiplier, 5);
+    expect(d.hp).toBeCloseTo(d.maxHp - JAB.hit.damage * TUNING.combat.botDamageMultiplier, 5);
   });
 });

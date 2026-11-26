@@ -8,8 +8,10 @@ Built to the brief `Stick_Empire_Low_Cost_Beta_MVP_Plan.docx` and the detailed p
 |---|---|
 | Game | TypeScript, HTML5 Canvas 2D, fixed 60 Hz simulation |
 | Web app | Next.js (App Router) + React |
-| Backend | Next.js API routes on Node.js |
-| Storage | Supabase (Postgres) for anonymous match logs and playtest feedback |
+| Backend | Next.js API routes on Node.js (`src/app/api`) |
+| Storage | Supabase (Postgres): match logs, feedback, wallets, payments, owned items |
+| Accounts | Supabase Auth: email magic link + Google (only needed for the shop) |
+| Payments | Stripe Checkout (cards, Apple/Google Pay, Link, local methods) + NOWPayments (crypto) |
 | Tests | Vitest (unit, integration, headless soak) |
 
 ## Quick start
@@ -56,11 +58,20 @@ src/
   app/                    Next.js pages and API routes
     api/match-log/        POST anonymous match summary + event log → Supabase
     api/feedback/         POST playtest feedback form → Supabase
-    api/health/           GET deployment check
-  components/             React screens (Home, How to Play, Settings, Setup, Pause, Results, Feedback)
+    api/health/           GET deployment check (which features are configured)
+    api/account/          GET wallet: balance, owned items, loadout, history
+    api/checkout/stripe/  POST create a Stripe Checkout for a point pack
+    api/checkout/crypto/  POST create a NOWPayments crypto invoice for a point pack
+    api/webhooks/stripe/  POST signed Stripe events: credit / fail / refund points
+    api/webhooks/nowpayments/ POST signed crypto IPN: credit / fail / refund points
+    api/shop/buy|equip/   POST spend points on a cosmetic / equip it
+    auth/callback/        GET finish magic-link / Google sign-in
+  proxy.ts                keeps the sign-in cookie fresh
+  components/             React screens (Home, How to Play, Settings, Setup, Pause, Results, Feedback, Shop)
   game/
     config/tuning.ts      ALL gameplay numbers (balance here)
     config/controls.ts    key bindings
+    config/shop.ts        point packs (prices) and the cosmetic catalog
     level/building.ts     the building: geometry, stairs, ladder, nav graph, spawns, flag zone
     sim/                  pure simulation: physics, combat, match rules (no browser code)
     ai/                   bot brain (state machine) and waypoint navigation
@@ -68,7 +79,7 @@ src/
     audio/                procedural Web Audio sound effects (no asset files)
     telemetry/            anonymous match log
     GameController.ts     loop + input + render + audio glue
-  lib/                    API client and server helpers (Supabase, validation)
+  lib/                    API clients; server/ holds Supabase, auth, validation and payments/ (core logic, Stripe, NOWPayments)
 supabase/migrations/      database schema (tables, row-level security, metrics view)
 tests/                    Vitest suites
 scripts/                  soak runner
@@ -110,7 +121,11 @@ F3 overlay (colliders, hit/hurt boxes, nav graph, bot states, seed) · F4 slow m
 - The browser posts to `/api/match-log` (when "Share anonymous match stats" is on in Settings) and to `/api/feedback`.
 - The API routes validate and bound every field, rate-limit by IP, and insert with the Supabase **publishable** key from server-side environment variables.
 - Row-level security allows **insert only**. The public API can't read any row. View the data in the Supabase dashboard; `select * from playtest_summary;` gives the brief §11 metrics.
-- No accounts, names or personal data are collected. `session_id` is a random id per browser tab session.
+- Playtest logs and feedback are anonymous: `session_id` is a random id per browser tab session.
+
+## Points shop and payments
+
+Signed-in players buy points (4 packs, $1.99–$19.99) by card/wallet through Stripe or with crypto through NOWPayments, then spend them on cosmetic hats, weapon skins and attack trails for their boss. Cosmetics are visual only and never change the simulation. Points are credited **only by signed webhooks**, exactly once, inside database functions. Setup: [docs/PAYMENTS.md](docs/PAYMENTS.md). Spec: [INKDOM_Payments_Plan.md](INKDOM_Payments_Plan.md).
 
 ## Deployment
 
@@ -119,3 +134,31 @@ See [docs/DEPLOY.md](docs/DEPLOY.md).
 ## Status
 
 See [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) and [docs/TEST_CHECKLIST.md](docs/TEST_CHECKLIST.md).
+
+## v2: accounts, online 1v1, real-motion combat (0.11.0-alpha)
+
+Spec: [INKDOM_v2_Plan.md](INKDOM_v2_Plan.md).
+
+| Feature | Where |
+|---|---|
+| Sign up / sign in / password reset (username + email + password, Google, magic link) | `/account`, `src/components/account/`, migration `20261126000000_accounts_online.sql` |
+| Online 1v1 (quick match, private rooms, reconnect, AI takeover) | `/online`, `server/` (Node WebSocket game server), `src/game/net/` · [docs/ONLINE.md](docs/ONLINE.md) |
+| Combo combat: 27 moves, chains, directional/air/chord moves, counter-hits, damage scaling, juggle limit, stamina, energy, crouch, dodge, unarmed (Fists) | `src/game/combat/` (data-driven) · [docs/CONTROLS.md](docs/CONTROLS.md) |
+| Real human motion from the CMU Motion Capture Database (14 clips), hand-authored fallbacks | `tools/mocap/`, `src/game/anim/` · [docs/MOCAP.md](docs/MOCAP.md) |
+| Full UI template for the GDD (hub, world map, cities, buildings, team, boss editor, bot hangar, commander, leaderboard, events, inbox, profile, settings with key remapping, help) | `src/app/(hub)/`, `src/components/hub/`, `src/features/registry.ts`, `src/services/` (mock data, swappable) |
+
+### New scripts
+| Command | What it does |
+|---|---|
+| `npm run dev:all` | Web app (:3000) + game server (:3001, guests allowed) |
+| `npm run server` / `npm run dev:server` | Game server (reads `.env.local`) |
+| `npm run mocap` | Rebuild motion clips from CMU data |
+| `node scripts/online-smoke.mjs ws://host:3001/ws` | Two-client online smoke test |
+
+### Extending (all modular)
+- **New move:** one entry in `src/game/combat/moves.ts` (plus an optional chain edge and clip). Move list, How to Play and AI pick it up.
+- **New motion:** add a clip in `tools/mocap/build.ts` (mocap) or `src/game/anim/authored.ts`.
+- **New screen:** add an entry to `src/features/registry.ts` plus a page in `src/app/(hub)/`.
+- **Real data instead of mocks:** implement the service interface and call `configureServices()` (`src/services/index.ts`).
+- **New protocol message:** `src/game/net/protocol.ts` + `server/gameServer.ts`.
+- **New control scheme (gamepad, touch):** `src/game/config/controls.ts`. The simulation only sees `InputFrame`s.

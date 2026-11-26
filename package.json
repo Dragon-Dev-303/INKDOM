@@ -10,18 +10,26 @@
     "test": "vitest run",
     "soak": "tsx scripts/soak.ts",
     "typecheck": "tsc --noEmit",
-    "balance": "tsx scripts/balance.ts"
+    "balance": "tsx scripts/balance.ts",
+    "mocap": "tsx tools/mocap/build.ts",
+    "server": "tsx --env-file-if-exists=.env.local server/index.ts",
+    "dev:server": "tsx watch --env-file-if-exists=.env.local server/index.ts",
+    "dev:all": "node scripts/dev-all.mjs"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.119.2",
     "next": "16.4.6",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "stripe": "^23.2.0",
+    "ws": "^8.23.0"
   },
   "devDependencies": {
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/ws": "^8.18.2",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "tsx": "^4.23.15",

@@ -1,11 +1,14 @@
 import { Sfx } from './audio/sfx';
-import { GLOBAL_KEYS, P1_BINDINGS, P2_BINDINGS } from './config/controls';
-import { DT, TUNING } from './config/tuning';
+import type { ResolvedCosmetics } from './config/shop';
+import { controlLabels, GLOBAL_KEYS, type Bindings, type SchemeId } from './config/controls';
+import { DT } from './config/tuning';
+import { loadBindings } from './controlsStore';
+import { MatchPresenter } from './presentation/MatchPresenter';
 import { KeyboardInput } from './core/input';
 import { newSeed } from './core/rng';
 import { BUILDING } from './level/building';
 import { Fx } from './render/fx';
-import { PALETTES, Renderer, type Banner, type Toast } from './render/renderer';
+import { PALETTES, Renderer } from './render/renderer';
 import type { Settings } from './settings';
 import {
   computeResults, createMatch, debugKillBots, debugSetCapture, debugSetTimer, isMatchOverForUi, stepMatch,
@@ -40,12 +43,13 @@ export class GameController {
   private debug: boolean;
   private slowMo = false;
   private stepOnce = false;
-  private banners: Banner[] = [];
-  private toasts: Toast[] = [];
+  private presenter: MatchPresenter;
+  private bindings: [Bindings, Bindings] = [loadBindings('localP1'), loadBindings('localP2')];
+  private hints: [ReturnType<typeof controlLabels>, ReturnType<typeof controlLabels>] = [controlLabels(this.bindings[0]), controlLabels(this.bindings[1])];
   private fpsSmooth = 60;
   private stepMs = 0;
-  private lastCaptureTick = 0;
   private resizeObs: ResizeObserver | null = null;
+  private cosmetics: readonly (ResolvedCosmetics | null)[] = [];
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -57,6 +61,7 @@ export class GameController {
     debugAllowed: boolean,
   ) {
     this.renderer = new Renderer(canvas, BUILDING);
+    this.presenter = new MatchPresenter(this.fx, sfx);
     this.debug = false;
     this.debugAllowed = debugAllowed;
     this.applySettings(settings);
@@ -64,6 +69,11 @@ export class GameController {
   }
 
   private debugAllowed: boolean;
+
+  /** Render-only cosmetic loadouts, indexed by player (0 = P1, 1 = P2). */
+  setCosmetics(c: readonly (ResolvedCosmetics | null)[]): void {
+    this.cosmetics = c;
+  }
 
   start(): void {
     this.input.attach(window);
@@ -90,14 +100,26 @@ export class GameController {
     this.sfx.setVolumes(s.masterVolume, s.sfxVolume, s.muted);
   }
 
+  /**
+   * Control schemes: vs CPU (one human) uses the one-keyboard 'solo' layout (J K U I O L);
+   * two humans share the keyboard with the local P1/P2 layouts. Remapped keys come from Settings.
+   */
+  private loadControls(config: MatchConfig): void {
+    const solo = config.controllers[1] === 'CPU';
+    const schemes: [SchemeId, SchemeId] = solo ? ['solo', 'localP2'] : ['localP1', 'localP2'];
+    this.bindings = [loadBindings(schemes[0]), loadBindings(schemes[1])];
+    this.hints = [controlLabels(this.bindings[0]), controlLabels(this.bindings[1])];
+    this.input.setExtraBindings(this.bindings);
+  }
+
   newMatch(config: MatchConfig): void {
     this.config = config;
+    this.loadControls(config);
     this.state = createMatch(config, newSeed());
     this.logger = new MatchLogger(this.sessionId, this.state);
     this.finished = false;
     this.acc = 0;
-    this.banners = [];
-    this.toasts = [];
+    this.presenter.reset();
     this.fx.clear();
     this.input.clear();
   }
@@ -139,7 +161,7 @@ export class GameController {
     else if (is(GLOBAL_KEYS.killBots)) debugKillBots(this.state, 'DEFENDER', events);
     else if (is(GLOBAL_KEYS.capture90)) debugSetCapture(this.state, 0.9);
     else if (is(GLOBAL_KEYS.timer10)) debugSetTimer(this.state, 10);
-    this.handleEvents(events);
+    this.presenter.handle(this.state, events, PALETTES[this.settings.colorScheme]);
   }
 
   private frame = (now: number) => {
@@ -175,12 +197,13 @@ export class GameController {
       fps: this.fpsSmooth,
       stepMs: this.stepMs,
       now: nowMs,
-      banners: this.banners,
-      toasts: this.toasts,
+      banners: this.presenter.banners,
+      toasts: this.presenter.toasts,
       smallWindow: window.innerWidth < 1280 || window.innerHeight < 680,
+      cosmetics: this.cosmetics,
+      controlHints: this.hints,
     });
-    this.banners = this.banners.filter((b) => b.until > nowMs);
-    this.toasts = this.toasts.filter((t) => t.until > nowMs);
+    this.presenter.prune(nowMs);
 
     if (!this.finished && isMatchOverForUi(this.state)) {
       this.finished = true;
@@ -190,78 +213,15 @@ export class GameController {
   };
 
   private tick() {
-    const p1: InputFrame = this.input.sample(P1_BINDINGS);
-    const p2: InputFrame = this.input.sample(P2_BINDINGS);
+    const p1: InputFrame = this.input.sample(this.bindings[0]);
+    const p2: InputFrame = this.input.sample(this.bindings[1]);
     this.input.endTick();
     const events: GameEvent[] = [];
     stepMatch(this.state, [p1, p2], events);
     const moved = (i: InputFrame) => i.left || i.right || i.up || i.down;
     this.logger.record(this.state, events, [moved(p1), moved(p2)]);
-    this.handleEvents(events);
-    // Capture ticking sound.
-    if (this.state.capture.state === 'CAPTURING' && this.state.tick - this.lastCaptureTick >= 30) {
-      this.lastCaptureTick = this.state.tick;
-      this.sfx.play('captureTick', this.state.capture.progress);
-    }
+    this.presenter.handle(this.state, events, PALETTES[this.settings.colorScheme]);
+    this.presenter.tickSounds(this.state);
   }
 
-  private banner(text: string, color: string, ms: number, sub?: string) {
-    const now = performance.now();
-    this.banners = [{ text, sub, color, start: now, until: now + ms }];
-  }
-
-  private toast(text: string, color: string) {
-    const now = performance.now();
-    this.toasts = [...this.toasts.slice(-2), { text, color, until: now + 1800 }];
-  }
-
-  private handleEvents(events: GameEvent[]) {
-    const pal = PALETTES[this.settings.colorScheme];
-    for (const e of events) {
-      switch (e.type) {
-        case 'COUNTDOWN': this.banner(String(e.value), '#F3F4F6', 900); this.sfx.play('countdown'); break;
-        case 'MATCH_START': this.banner('FIGHT!', '#F4D35E', 900); this.sfx.play('horn'); break;
-        case 'ATTACK_START': {
-          const heavy = e.attack === 'IRON_BAR' || e.attack === 'SHORT_SWORD';
-          this.sfx.play(heavy ? 'swingHeavy' : 'swingLight');
-          break;
-        }
-        case 'HIT':
-          this.fx.hit(e.x, e.y, e.heavy || e.guardBreak, e.blocked);
-          this.sfx.play(e.guardBreak ? 'guardBreak' : e.blocked ? 'block' : e.heavy ? 'hitHeavy' : 'hitLight');
-          break;
-        case 'KO': this.fx.ko(e.x, e.y); this.sfx.play('ko'); break;
-        case 'RESPAWN': {
-          const f = this.state.fighters[e.fighter];
-          this.fx.puff(f.pos.x, f.pos.y);
-          if (f.isBoss) this.sfx.play('respawn');
-          break;
-        }
-        case 'JUMP': if (this.state.fighters[e.fighter].isBoss) this.sfx.play('jump'); break;
-        case 'COMMAND': {
-          const boss = this.state.fighters[e.team === 'ATTACKER' ? 0 : 4];
-          const who = this.state.config.controllers[boss.playerIndex as 0 | 1] === 'CPU' ? 'CPU' : `P${boss.playerIndex + 1}`;
-          this.toast(`${who} squad → ${e.command}`, e.team === 'ATTACKER' ? pal.attacker : pal.defender);
-          this.sfx.play('command');
-          break;
-        }
-        case 'CAPTURE_STATE':
-          if (e.state === 'CONTESTED') { this.toast('FLAG CONTESTED!', '#ff5577'); this.sfx.play('contested'); }
-          else if (e.state === 'CAPTURING') this.toast('Attackers capturing the flag!', pal.attacker);
-          break;
-        case 'TIMER_WARNING':
-          if (e.secondsLeft === 30) this.banner('0:30 REMAINING', '#ef4444', 1500);
-          this.sfx.play('warning');
-          break;
-        case 'STUCK': if (e.level >= 2) this.fx.puff(e.x, e.y); break;
-        case 'MATCH_END': {
-          const atk = e.winner === 'ATTACKER';
-          this.banner(atk ? 'ATTACKERS WIN' : 'DEFENDERS WIN', atk ? pal.attacker : pal.defender,
-            TUNING.match.endBannerSeconds * 1000 / 0.5, atk ? 'FLAG CAPTURED' : 'BUILDING HELD');
-          this.sfx.play(atk ? 'captured' : 'held');
-          break;
-        }
-      }
-    }
-  }
 }

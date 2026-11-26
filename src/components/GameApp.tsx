@@ -8,17 +8,20 @@ import { DEFAULT_SETTINGS, getSessionId, loadSettings, saveSettings, type Settin
 import { DEFAULT_CONFIG, type MatchResults } from '@/game/sim/match';
 import type { MatchConfig } from '@/game/sim/types';
 import type { MatchLogPayload } from '@/game/telemetry/matchLog';
+import { resolveLoadout, type ResolvedCosmetics } from '@/game/config/shop';
+import { useAccount } from '@/lib/account/AccountContext';
 import { submitFeedback, submitMatchLog } from '@/lib/api';
+import { useRouter } from 'next/navigation';
 import { FeedbackScreen, HomeScreen, HowToScreen, PauseMenu, ResultsScreen, SettingsScreen, SetupScreen } from './screens';
 
 type Screen = 'home' | 'howto' | 'settings' | 'setup' | 'game' | 'results' | 'feedback';
 
 /** Top-level screen router (plan §4.13). The canvas game runs only on the 'game' screen. */
 export default function GameApp() {
-  const [screen, setScreen] = useState<Screen>('home');
+  const [screen, setScreen] = useState<Screen>('setup');
   const [returnTo, setReturnTo] = useState<Screen>('home');
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [config, setConfig] = useState<MatchConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<MatchConfig>({ ...DEFAULT_CONFIG, controllers: ['HUMAN', 'CPU'] });
   const [matchKey, setMatchKey] = useState(0);
   const [paused, setPaused] = useState(false);
   const [results, setResults] = useState<MatchResults | null>(null);
@@ -29,6 +32,12 @@ export default function GameApp() {
   const [sessionId, setSessionId] = useState('');
   const [sfx] = useState(() => new Sfx());
   const settingsRef = useRef(settings);
+  const { account } = useAccount();
+  const router = useRouter();
+  const [cosmeticsPlayer, setCosmeticsPlayer] = useState<0 | 1>(0);
+
+  const myLook = account.signedIn ? resolveLoadout(account.loadout) : null;
+  const cosmetics: (ResolvedCosmetics | null)[] = cosmeticsPlayer === 0 ? [myLook, null] : [null, myLook];
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -115,12 +124,17 @@ export default function GameApp() {
           onHowTo={() => { setReturnTo('home'); go('howto'); }}
           onSettings={() => { setReturnTo('home'); go('settings'); }}
           onFeedback={() => { setReturnTo('home'); go('feedback'); }}
+          onShop={() => router.push('/shop')}
+          account={account}
         />
       )}
       {screen === 'howto' && <HowToScreen onBack={() => go(returnTo)} />}
       {screen === 'settings' && <SettingsScreen settings={settings} onChange={updateSettings} onBack={() => go(returnTo)} />}
       {screen === 'setup' && (
-        <SetupScreen config={config} onChange={setConfig} onStart={() => startMatch(config)} onBack={() => go('home')} />
+        <SetupScreen
+          config={config} onChange={setConfig} onStart={() => startMatch(config)} onBack={() => router.push('/')}
+          cosmetics={myLook ? { player: cosmeticsPlayer, onPlayer: setCosmeticsPlayer } : undefined}
+        />
       )}
       {screen === 'game' && (
         <GameView
@@ -129,6 +143,7 @@ export default function GameApp() {
           settings={settings}
           sfx={sfx}
           sessionId={sessionId}
+          cosmetics={cosmetics}
           paused={paused}
           onPauseChange={setPaused}
           onMatchOver={onMatchOver}
@@ -160,6 +175,7 @@ export default function GameApp() {
 
 function GameView(props: {
   config: MatchConfig; settings: Settings; sfx: Sfx; sessionId: string; paused: boolean;
+  cosmetics: (ResolvedCosmetics | null)[];
   onPauseChange: (p: boolean) => void; onMatchOver: (r: MatchResults, l: MatchLogPayload) => void;
   onMuteToggle: () => void; onQuit: () => void;
 }) {
@@ -184,6 +200,7 @@ function GameView(props: {
       debugAllowed,
     );
     ctrlRef.current = ctrl;
+    ctrl.setCosmetics(props.cosmetics);
     ctrl.start();
     return () => {
       ctrl.destroy();

@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { CONTROL_LABELS } from '@/game/config/controls';
+import { controlLabels, DEFAULT_BINDINGS, type SchemeId } from '@/game/config/controls';
+import { formatInputs, listMoveDocs } from '@/game/combat/movelist';
 import { BUILD_VERSION, TUNING } from '@/game/config/tuning';
 import type { MatchResults } from '@/game/sim/match';
 import type { Controller, MatchConfig, WeaponId } from '@/game/sim/types';
@@ -10,7 +11,7 @@ import type { FeedbackPayload } from '@/lib/api';
 import MapPreview from './MapPreview';
 
 /** Keyboard navigation for menus: arrows move focus, Esc goes back, first button autofocuses. */
-function MenuCard({ children, onBack, narrow, overlay }: { children: ReactNode; onBack?: () => void; narrow?: boolean; overlay?: boolean }) {
+export function MenuCard({ children, onBack, narrow, overlay }: { children: ReactNode; onBack?: () => void; narrow?: boolean; overlay?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -40,14 +41,24 @@ function MenuCard({ children, onBack, narrow, overlay }: { children: ReactNode; 
 }
 
 // ---------------- Home ----------------
-export function HomeScreen(props: { onPlay: () => void; onHowTo: () => void; onSettings: () => void; onFeedback: () => void; touchOnly: boolean }) {
+export function HomeScreen(props: {
+  onPlay: () => void; onHowTo: () => void; onSettings: () => void; onFeedback: () => void; onShop: () => void; touchOnly: boolean;
+  account: { signedIn: boolean; email?: string | null; balance?: number; authEnabled: boolean };
+}) {
+  const a = props.account;
   return (
     <MenuCard narrow>
+      {a.authEnabled && (
+        <button className="account-chip" onClick={props.onShop} title={a.signedIn ? 'Open the shop' : 'Sign in'}>
+          {a.signedIn ? <>◆ {(a.balance ?? 0).toLocaleString('en-US')} <span className="muted">· {a.email}</span></> : 'Sign in'}
+        </button>
+      )}
       <h1 className="title"><span className="atk">INK</span><span className="def">DOM</span></h1>
       <p className="subtitle">Beta</p>
       {props.touchOnly && <div className="notice">This beta needs a desktop keyboard (two players share one keyboard).</div>}
       <div className="menu">
         <button className="btn primary" onClick={props.onPlay} data-autofocus>PLAY LOCAL</button>
+        <button className="btn" onClick={props.onShop}>SHOP</button>
         <button className="btn" onClick={props.onHowTo}>HOW TO PLAY</button>
         <button className="btn" onClick={props.onSettings}>SETTINGS</button>
       </div>
@@ -60,17 +71,33 @@ export function HomeScreen(props: { onPlay: () => void; onHowTo: () => void; onS
 }
 
 // ---------------- How to play ----------------
-function KeyTable({ player }: { player: 0 | 1 }) {
-  const L = player === 0 ? CONTROL_LABELS.p1 : CONTROL_LABELS.p2;
+function KeyTable({ scheme }: { scheme: SchemeId }) {
+  const L = controlLabels(DEFAULT_BINDINGS[scheme]);
   const rows: [string, string][] = [
-    ['Move', L.move], ['Jump (tap) / climb stairs & ladder (hold)', L.jumpClimb], ['Go down stairs / ladder', L.down],
-    ['Punch', L.punch], ['Kick', L.kick], ['Weapon strike', L.weapon], ['Block (hold)', L.block], ['Squad command', L.command],
+    ['Move', L.move], ['Jump (tap) / climb (hold)', L.jumpClimb], ['Crouch / go down', L.down],
+    ['Punch', L.punch], ['Kick', L.kick], ['Heavy', L.heavy], ['Weapon / elbow', L.weapon], ['Special (energy)', L.special],
+    ['Block (hold, + down = low)', L.block], ['Dodge', L.dodge], ['Squad command', L.command],
   ];
   return (
     <table className="keys">
       <tbody>
         {rows.map(([a, k]) => (
           <tr key={a}><td>{a}</td><td><kbd>{k}</kbd></td></tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+const COMBO_IDS = ['rear_uppercut', 'roundhouse', 'power_straight', 'elbow', 'spin_backfist', 'low_kick', 'side_kick', 'lunge_punch', 'knee', 'back_kick', 'crouch_uppercut', 'sweep', 'axe_kick', 'tornado_kick'];
+
+function ComboTable() {
+  const docs = listMoveDocs().filter((d) => COMBO_IDS.includes(d.id));
+  return (
+    <table className="keys">
+      <tbody>
+        {docs.map((d) => (
+          <tr key={d.id}><td>{d.name}{d.requires ? <span className="muted small"> ({d.requires})</span> : null}</td><td><kbd>{formatInputs(d.inputs, DEFAULT_BINDINGS.solo)}</kbd></td></tr>
         ))}
       </tbody>
     </table>
@@ -88,9 +115,14 @@ export function HowToContent() {
         <strong style={{ color: 'var(--defender)' }}>■ Defenders</strong> start on the top floors. Stop the capture until the{' '}
         {Math.floor(TUNING.match.timerSeconds / 60)}:00 timer runs out. A defender in the zone pauses the capture. An empty zone slowly loses progress.
       </p>
+      <h3>Solo vs CPU and online (one keyboard per player)</h3>
+      <KeyTable scheme="solo" />
+      <h3>Combos (solo keys; Fwd/Back are relative to where you face)</h3>
+      <ComboTable />
+      <p className="muted small">Full list with frame data: Move list. Change any key in Settings → Controls.</p>
       <div className="two-col">
-        <div><h3>Player 1 (left side of keyboard)</h3><KeyTable player={0} /></div>
-        <div><h3>Player 2 (right side of keyboard)</h3><KeyTable player={1} /></div>
+        <div><h3>Local Player 1 (left side)</h3><KeyTable scheme="localP1" /></div>
+        <div><h3>Local Player 2 (right side)</h3><KeyTable scheme="localP2" /></div>
       </div>
       <h3>Squad commands (cycle with your command key)</h3>
       <ul className="tips">
@@ -102,7 +134,9 @@ export function HowToContent() {
       <ul className="tips">
         <li>The outside <strong>ladder</strong> to the floor-2 window is a shortcut for attackers.</li>
         <li>Walk off the edge of a <strong>stairwell opening</strong> (yellow marks) to drop one floor fast.</li>
-        <li>Blocking stops most damage from the front, but the <strong>iron bar breaks a block</strong>.</li>
+        <li>Standing block stops high and mid attacks; hold <strong>down while blocking</strong> to stop lows. Overheads (air attacks, axe kick, bar smash) beat a crouching block.</li>
+        <li>Hitting someone while they start an attack is a <strong>COUNTER</strong> (+20% damage). Long combos deal less per hit.</li>
+        <li>Stamina (green) is spent by dodges, heavies and blocking; energy (violet) builds as you fight and powers specials.</li>
         <li>Too many hits in a row knock a fighter down. Only two bots can attack one target at once.</li>
         <li>KO&apos;d fighters respawn: bosses after {TUNING.fighters.bossRespawnSeconds}s, bots after {TUNING.fighters.botRespawnSeconds}s.</li>
         <li><kbd>Esc</kbd> pauses, <kbd>M</kbd> mutes.</li>
@@ -160,7 +194,11 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
 }
 
 // ---------------- Match setup ----------------
-export function SetupScreen({ config, onChange, onStart, onBack }: { config: MatchConfig; onChange: (c: MatchConfig) => void; onStart: () => void; onBack: () => void }) {
+export function SetupScreen({ config, onChange, onStart, onBack, cosmetics }: {
+  config: MatchConfig; onChange: (c: MatchConfig) => void; onStart: () => void; onBack: () => void;
+  /** Shown when the signed-in player has equipped cosmetics. */
+  cosmetics?: { player: 0 | 1; onPlayer: (p: 0 | 1) => void };
+}) {
   const teamOf = (p: 0 | 1) => (p === 0 ? config.p1Team : config.p1Team === 'ATTACKER' ? 'DEFENDER' : 'ATTACKER');
   const setWeapon = (p: 0 | 1, w: WeaponId) => {
     const weapons = [...config.weapons] as [WeaponId, WeaponId];
@@ -198,6 +236,7 @@ export function SetupScreen({ config, onChange, onStart, onBack }: { config: Mat
         <div className="field">
           <label>Weapon</label>
           <div className="segmented">
+            <button className={`btn${config.weapons[p] === 'FISTS' ? ' active' : ''}`} onClick={() => setWeapon(p, 'FISTS')}>Fists</button>
             <button className={`btn${config.weapons[p] === 'SHORT_SWORD' ? ' active' : ''}`} onClick={() => setWeapon(p, 'SHORT_SWORD')}>Short sword</button>
             <button className={`btn${config.weapons[p] === 'IRON_BAR' ? ' active' : ''}`} onClick={() => setWeapon(p, 'IRON_BAR')}>Iron bar</button>
           </div>
@@ -209,10 +248,19 @@ export function SetupScreen({ config, onChange, onStart, onBack }: { config: Mat
     <MenuCard onBack={onBack}>
       <h2>Match setup</h2>
       <div className="setup-grid">{box(0)}{box(1)}</div>
+      {cosmetics && (
+        <div className="field center-field">
+          <label>My cosmetics on</label>
+          <div className="segmented">
+            <button className={`btn${cosmetics.player === 0 ? ' active' : ''}`} onClick={() => cosmetics.onPlayer(0)}>Player 1</button>
+            <button className={`btn${cosmetics.player === 1 ? ' active' : ''}`} onClick={() => cosmetics.onPlayer(1)}>Player 2</button>
+          </div>
+        </div>
+      )}
       <div className="preview"><MapPreview /></div>
       <p className="muted small" style={{ textAlign: 'center' }}>
         Capture: {TUNING.match.captureSeconds}s uncontested · Timer: {Math.floor(TUNING.match.timerSeconds / 60)}:00 · Each boss leads 3 bots ·
-        Sword is quicker with more reach; the bar hits harder and breaks blocks.
+        Fists use the full combo set; the sword is quick with reach; the bar breaks blocks. Vs CPU you play with J/K/U/I/O/L.
       </p>
       <div className="row spread">
         <button className="btn" onClick={onBack}>BACK</button>
